@@ -1,0 +1,24 @@
+[
+  {
+    "id": "q001",
+    "question": "PMJAY beneficiary identification criteria",
+    "gold_chunk_ids": [
+      "ayushman-bharat-pmjay__2__p7-7__c0007",
+      "ayushman-bharat-pmjay__2__p17-17__c0034"
+    ]
+  },
+  {
+    "id": "q002",
+    "question": "who is eligible for PMJAY",
+    "gold_chunk_ids": [
+      "ayushman-bharat-pmjay__4-3__p51-52__c0160"
+    ]
+  },
+  {
+    "id": "q003",
+    "question": "Detailed steps for beneficiary identification and issuance of e-card under PMJAY",
+    "gold_chunk_ids": [
+      "ayushman-bharat-pmjay__2-2__p19-22__c0037"
+    ]
+  }
+]

@@ -1,0 +1,15 @@
+.DS_Store
+.venv/
+.zencoder/
+.zenflow/
+
+__pycache__/
+*.py[cod]
+
+data/raw_pdfs/*.pdf
+data/extracted_text/*.txt
+data/chunks.jsonl
+data/indexes/
+
+.pytest_cache/
+.mypy_cache/
