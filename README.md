@@ -13,8 +13,6 @@ license: mit
 
 **Domain-specific Question Answering on Indian policy corpora using hybrid retrieval and a custom decoder-only Transformer.**
 
-> Course Project — Natural Language Processing
-> Krish Saini (230708) · Mentor: Dr. Atul Mishra · BML Munjal University
 
 A grounded RAG system that answers questions over Indian policy documents (NEP 2020, DPDP Act, IT Rules, RBI circulars, etc.). Every answer cites the exact source chunk. Users can also upload any PDF and query it on the fly.
 
