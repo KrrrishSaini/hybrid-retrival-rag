@@ -1,172 +1,154 @@
-# Chat-with-Policy-Docs (Ingestion Foundation)
+---
+title: Chat with Policy Docs
+emoji: 📄
+colorFrom: blue
+colorTo: indigo
+sdk: docker
+app_port: 7860
+pinned: false
+license: mit
+---
 
-This repository currently implements **data ingestion + section-aware chunking** for policy PDFs. Retrieval, reranking, and answer generation modules are scaffolded for later milestones.
+# Chat with Policy Documents
 
-## Setup
+**Domain-specific Question Answering on Indian policy corpora using hybrid retrieval and a custom decoder-only Transformer.**
+
+> Course Project — Natural Language Processing
+> Krish Saini (230708) · Mentor: Dr. Atul Mishra · BML Munjal University
+
+A grounded RAG system that answers questions over Indian policy documents (NEP 2020, DPDP Act, IT Rules, RBI circulars, etc.). Every answer cites the exact source chunk. Users can also upload any PDF and query it on the fly.
+
+---
+
+## Architecture
+
+```
+PDF ingest → Chunks → BM25 ⊕ Dense (α=0.6) → Cross-encoder rerank → LLM generation → Cited answer
+```
+
+| Stage      | Component                                   |
+| ---------- | ------------------------------------------- |
+| Tokenizer  | Custom BPE (5,182 vocab, trained from scratch) |
+| Sparse IR  | Okapi BM25 (`rank_bm25`)                    |
+| Dense IR   | `sentence-transformers/all-MiniLM-L6-v2`    |
+| Fusion     | Min-max normalized convex combo (α = 0.6)   |
+| Reranker   | `cross-encoder/ms-marco-MiniLM-L-6-v2`      |
+| Generator  | Custom 20 M-param decoder-only Transformer (PyTorch) + Qwen2.5-0.5B-Instruct for synthesis |
+| API        | FastAPI + Uvicorn                           |
+| UI         | Single-page vanilla JS                      |
+
+---
+
+## Results — 597 domain QA pairs
+
+| Method              | Recall@5  | MRR@10   | nDCG@10  |
+| ------------------- | --------- | -------- | -------- |
+| BM25                | 0.6047    | 0.4460   | 0.5159   |
+| Dense (MiniLM-L6)   | 0.3635    | 0.2360   | 0.2888   |
+| Hybrid (α = 0.6)    | 0.6047    | 0.4594   | 0.5178   |
+| **Hybrid + Rerank** | **0.6700**| **0.5118**| **0.5705** |
+
+Reranking is the single biggest lever: +11 % Recall@5, +14 % MRR over hybrid alone.
+
+---
+
+## Run locally
 
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
+git clone https://github.com/KrrrishSaini/hybrid-retrival-rag.git
+cd hybrid-retrival-rag
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+uvicorn app.api:app --port 8000
 ```
 
-This installs BM25 + dense retrieval dependencies, including sentence-transformers.
+Then open <http://127.0.0.1:8000/>.
 
-## Input Data
+First boot downloads the three HuggingFace models (~1.5 GB).
 
-Put source PDFs in:
+---
 
-- `data/raw_pdfs/`
-
-Optional extracted page text is written to:
-
-- `data/extracted_text/`
-
-## Build Chunks
+## Run with Docker
 
 ```bash
-python -m src.ingest.build_chunks --input_dir data/raw_pdfs --output_path data/chunks.jsonl
+docker build -t policy-rag .
+docker run -p 7860:7860 policy-rag
 ```
 
-Quick test (process only first N PDFs):
+This is the same image used on Hugging Face Spaces.
+
+---
+
+## Project structure
+
+```
+app/
+├── api.py              # FastAPI endpoints (/query /upload /sessions /chunks /health)
+├── sessions.py         # LRU store for user-uploaded PDFs
+└── static/index.html   # Single-page web UI
+
+src/
+├── ingest/             # PDF text extraction + chunking
+├── retrieval/
+│   ├── bm25_baseline.py
+│   ├── dense_baseline.py
+│   ├── hybrid_retriever.py
+│   └── reranker.py
+├── llm/
+│   ├── model.py            # Custom 20M decoder-only Transformer
+│   ├── tokenizer.py        # BPE trainer
+│   └── pretrained_generate.py  # Qwen2.5 wrapper
+├── rag/
+│   └── answer.py
+└── evaluation/         # Recall@k, MRR, nDCG
+
+data/
+├── raw_pdfs/           # Source PDFs (gitignored)
+├── chunks.jsonl        # Chunked corpus (generated)
+├── indexes/            # Dense index (generated)
+└── llm/model.pt        # Custom Transformer checkpoint (gitignored, 117 MB)
+
+report/
+├── report.md
+├── NLP_Project_Report.docx
+├── NLP_Project_Presentation.pptx
+└── build_*.py          # docx / pptx generators
+```
+
+---
+
+## API
+
+| Method | Path                      | Purpose                                |
+| ------ | ------------------------- | -------------------------------------- |
+| GET    | `/health`                 | Liveness probe                          |
+| GET    | `/chunks`                 | List indexed documents                  |
+| POST   | `/query`                  | RAG query → grounded answer + citations |
+| POST   | `/upload`                 | Upload a PDF, open a query session      |
+| GET    | `/sessions`               | List active upload sessions             |
+| DELETE | `/sessions/{session_id}`  | Drop a session                          |
+
+Example:
 
 ```bash
-python -m src.ingest.build_chunks --limit_pdfs 2
+curl -X POST http://127.0.0.1:8000/query \
+  -H "Content-Type: application/json" \
+  -d '{"question":"What does NEP 2020 say about multilingual education?","top_k":5}'
 ```
 
-Optional flag to write extracted text dumps:
+---
 
-```bash
-python -m src.ingest.build_chunks --write_extracted_text
-```
+## Custom Transformer checkpoint
 
-## BM25 Baseline Retrieval
+The 117 MB `data/llm/model.pt` is **not** tracked in git (exceeds GitHub's 100 MB hard limit). To use it:
 
-Install dependencies:
+- **Retrain**: run the training script under `src/llm/`
+- Or pull from a Git LFS / HF Hub mirror once published.
 
-```bash
-pip install -r requirements.txt
-```
+The shipped demo runs with **Qwen2.5-0.5B-Instruct** for fluent answer synthesis grounded on retrieved chunks.
 
-Run BM25 retrieval:
+---
 
-```bash
-python3 -m src.retrieval.bm25_baseline --query "eligibility criteria for PMJAY" --top_k 10
-```
+## License
 
-## Dense Baseline Retrieval
-
-Run dense retrieval:
-
-```bash
-python3 -m src.retrieval.dense_baseline --query "who is eligible for PMJAY" --top_k 10
-```
-
-Another example:
-
-```bash
-python3 -m src.retrieval.dense_baseline --query "PMJAY beneficiary identification criteria" --top_k 10
-```
-
-Dense cache files are stored in:
-
-- `data/indexes/dense/embeddings.npy`
-- `data/indexes/dense/chunks_metadata.jsonl`
-- `data/indexes/dense/manifest.json`
-
-Cache rebuild behavior:
-- Reuses cache when `data/chunks.jsonl` hash and model name match manifest.
-- Rebuilds automatically if chunks file changes.
-- Use `--force_rebuild` to force recomputation.
-
-Mac note:
-- `faiss-cpu` is optional and skipped on macOS in `requirements.txt`.
-- On macOS, the retriever automatically uses `scikit-learn` (`NearestNeighbors`, cosine).
-- On non-mac platforms with FAISS installed, it will prefer FAISS `IndexFlatIP`.
-
-## Hybrid Retrieval (BM25 + Dense)
-
-Run hybrid retrieval with weighted fusion:
-
-```bash
-python3 -m src.retrieval.hybrid_retriever --query "who is eligible for PMJAY" --top_k 5 --alpha 0.6
-```
-
-Run another example:
-
-```bash
-python3 -m src.retrieval.hybrid_retriever --query "PMJAY beneficiary identification criteria" --top_k 5 --alpha 0.5
-```
-
-Hybrid defaults:
-- Candidate pools: `--top_k_bm25 20`, `--top_k_dense 20`
-- Fusion score: `final = alpha * bm25_norm + (1 - alpha) * dense_norm`
-- Scores are min-max normalized to `[0, 1]` before fusion.
-- In restricted/offline environments, add `--local_files_only` to avoid network calls for dense model loading.
-
-## Hybrid + Cross-Encoder Reranker
-
-Run hybrid retrieval with reranking:
-
-```bash
-python3 -m src.retrieval.hybrid_retriever --query "who is eligible for PMJAY" --top_k 5 --alpha 0.6 --use_reranker
-```
-
-Offline/restricted-network mode:
-
-```bash
-python3 -m src.retrieval.hybrid_retriever --query "who is eligible for PMJAY" --top_k 5 --alpha 0.6 --use_reranker --local_files_only
-```
-
-How reranking works:
-- Hybrid retriever first builds a candidate pool (`--top_k_hybrid_candidates`, default `20`).
-- Cross-encoder reranker (`cross-encoder/ms-marco-MiniLM-L-6-v2`) scores each `(query, chunk_text)` pair.
-- Final output is sorted by `rerank_score` while still showing hybrid/BM25/dense scores for traceability.
-
-## Retrieval Evaluation (Light)
-
-Run retrieval evaluation on `data/qa_dataset.json`:
-
-```bash
-python3 -m src.evaluation.eval_retrieval --top_k 10 --alpha 0.6 --use_reranker
-```
-
-Metrics reported:
-- `Recall@5`
-- `MRR@10`
-
-Evaluated methods:
-- BM25
-- Dense
-- Hybrid
-- Hybrid + Reranker (when `--use_reranker` is enabled)
-
-## Output Format (`data/chunks.jsonl`)
-
-Each line is one JSON object with fields:
-
-- `doc_name`
-- `source_path`
-- `page_start`
-- `page_end`
-- `section_title`
-- `section_id`
-- `chunk_id`
-- `text`
-
-`chunk_id` is deterministic and stable for a document/chunk order.
-
-## Current Scope
-
-Implemented:
-- PDF text extraction (page-wise)
-- Boilerplate line deduplication (repeated headers/footers)
-- Section-aware chunking with regex heading detection
-- Chunk JSONL writer + CLI sanity output
-- BM25 retrieval baseline
-- Dense retrieval baseline with cache + FAISS/sklearn fallback
-- Hybrid retrieval baseline (BM25 + Dense score fusion)
-- Cross-encoder reranking on top of hybrid retrieval
-
-Planned next:
-- QA and retrieval evaluation suite
+MIT

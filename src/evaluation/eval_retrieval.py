@@ -1,10 +1,11 @@
-"""Light retrieval evaluation for BM25, Dense, Hybrid, and Hybrid+Reranker."""
+"""Retrieval evaluation: Recall@K, MRR@K, and nDCG@K for all retrieval methods."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import logging
+import math
 from pathlib import Path
 from statistics import mean
 from typing import Any
@@ -46,6 +47,27 @@ def mrr_at_k(gold_ids: list[str], retrieved_ids: list[str], k: int) -> float:
         if chunk_id in gold_set:
             return 1.0 / rank
     return 0.0
+
+
+def ndcg_at_k(gold_ids: list[str], retrieved_ids: list[str], k: int) -> float:
+    """Compute nDCG@k (binary relevance: 1 if gold, 0 otherwise)."""
+    if k <= 0:
+        raise ValueError("k must be > 0.")
+    gold_set = {item for item in gold_ids if item}
+    if not gold_set:
+        return 0.0
+
+    # DCG: sum of 1/log2(rank+1) for each relevant result in top-k
+    dcg = 0.0
+    for rank, chunk_id in enumerate(retrieved_ids[:k], start=1):
+        if chunk_id in gold_set:
+            dcg += 1.0 / math.log2(rank + 1)
+
+    # Ideal DCG: all relevant results at the top
+    ideal_k = min(len(gold_set), k)
+    idcg = sum(1.0 / math.log2(rank + 1) for rank in range(1, ideal_k + 1))
+
+    return dcg / idcg if idcg > 0 else 0.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -171,12 +193,16 @@ def _format_metric(value: float | None) -> str:
 
 def _print_summary(metrics: dict[str, dict[str, float | None]]) -> None:
     """Print a clean summary table."""
-    print("Method            | Recall@5 | MRR@10")
-    print("--------------------------------------")
+    print("Method            | Recall@5 | MRR@10   | nDCG@10")
+    print("---------------------------------------------------")
     for method in ["BM25", "Dense", "Hybrid", "Hybrid+Reranker"]:
         recall_value = metrics.get(method, {}).get("recall@5")
         mrr_value = metrics.get(method, {}).get("mrr@10")
-        print(f"{method:<17} | {_format_metric(recall_value):<8} | {_format_metric(mrr_value):<8}")
+        ndcg_value = metrics.get(method, {}).get("ndcg@10")
+        print(
+            f"{method:<17} | {_format_metric(recall_value):<8} "
+            f"| {_format_metric(mrr_value):<8} | {_format_metric(ndcg_value):<8}"
+        )
 
 
 def main() -> int:
@@ -231,10 +257,10 @@ def main() -> int:
         return 1
 
     scores: dict[str, dict[str, list[float]]] = {
-        "BM25": {"recall@5": [], "mrr@10": []},
-        "Dense": {"recall@5": [], "mrr@10": []},
-        "Hybrid": {"recall@5": [], "mrr@10": []},
-        "Hybrid+Reranker": {"recall@5": [], "mrr@10": []},
+        "BM25": {"recall@5": [], "mrr@10": [], "ndcg@10": []},
+        "Dense": {"recall@5": [], "mrr@10": [], "ndcg@10": []},
+        "Hybrid": {"recall@5": [], "mrr@10": [], "ndcg@10": []},
+        "Hybrid+Reranker": {"recall@5": [], "mrr@10": [], "ndcg@10": []},
     }
 
     for sample in qa_samples:
@@ -247,12 +273,15 @@ def main() -> int:
 
         scores["BM25"]["recall@5"].append(recall_at_k(gold_ids, bm25_ids, metric_k_recall))
         scores["BM25"]["mrr@10"].append(mrr_at_k(gold_ids, bm25_ids, metric_k_mrr))
+        scores["BM25"]["ndcg@10"].append(ndcg_at_k(gold_ids, bm25_ids, metric_k_mrr))
 
         scores["Dense"]["recall@5"].append(recall_at_k(gold_ids, dense_ids, metric_k_recall))
         scores["Dense"]["mrr@10"].append(mrr_at_k(gold_ids, dense_ids, metric_k_mrr))
+        scores["Dense"]["ndcg@10"].append(ndcg_at_k(gold_ids, dense_ids, metric_k_mrr))
 
         scores["Hybrid"]["recall@5"].append(recall_at_k(gold_ids, hybrid_ids, metric_k_recall))
         scores["Hybrid"]["mrr@10"].append(mrr_at_k(gold_ids, hybrid_ids, metric_k_mrr))
+        scores["Hybrid"]["ndcg@10"].append(ndcg_at_k(gold_ids, hybrid_ids, metric_k_mrr))
 
         if reranker is not None:
             hybrid_candidates = hybrid_retriever.retrieve(question, top_k=rerank_candidate_k)
@@ -264,14 +293,19 @@ def main() -> int:
             scores["Hybrid+Reranker"]["mrr@10"].append(
                 mrr_at_k(gold_ids, rerank_ids, metric_k_mrr)
             )
+            scores["Hybrid+Reranker"]["ndcg@10"].append(
+                ndcg_at_k(gold_ids, rerank_ids, metric_k_mrr)
+            )
 
     summary: dict[str, dict[str, float | None]] = {}
     for method, method_scores in scores.items():
         recall_values = method_scores["recall@5"]
         mrr_values = method_scores["mrr@10"]
+        ndcg_values = method_scores["ndcg@10"]
         summary[method] = {
             "recall@5": mean(recall_values) if recall_values else None,
             "mrr@10": mean(mrr_values) if mrr_values else None,
+            "ndcg@10": mean(ndcg_values) if ndcg_values else None,
         }
 
     print(f"QA samples evaluated: {len(qa_samples)}")

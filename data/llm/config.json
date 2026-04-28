@@ -1,0 +1,23 @@
+{
+  "model": {
+    "vocab_size": 5182,
+    "block_size": 512,
+    "n_layers": 8,
+    "n_heads": 8,
+    "n_embd": 512,
+    "dropout": 0.1
+  },
+  "tokenizer_path": "data/tokenizer/tokenizer.json",
+  "corpus_path": "data/qa_training.txt",
+  "training": {
+    "epochs": 8,
+    "batch_size": 8,
+    "lr": 0.0003,
+    "block_size": 512,
+    "stride": 128,
+    "max_tokens": null,
+    "device": "mps",
+    "seed": 42,
+    "total_steps": 1648
+  }
+}

@@ -84,8 +84,19 @@ class BM25BaselineRetriever:
         LOGGER.info("Loaded %d chunks from %s", len(chunks), chunks_path)
         return cls(chunks)
 
-    def retrieve(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
-        """Retrieve top-k chunks for a query."""
+    def retrieve(
+        self, query: str, top_k: int = 10, *, doc_filter: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Retrieve top-k chunks for a query.
+
+        Args:
+            query: Search query text.
+            top_k: Number of results to return.
+            doc_filter: If set, only return chunks whose ``doc_name`` contains
+                this substring (case-insensitive).  Useful for restricting
+                retrieval to a single policy document and reducing cross-scheme
+                noise.
+        """
         if top_k <= 0:
             raise ValueError("top_k must be > 0.")
         query_tokens = simple_tokenize(query)
@@ -93,11 +104,19 @@ class BM25BaselineRetriever:
             raise ValueError("Query has no searchable tokens after tokenization.")
 
         scores = self.bm25.get_scores(query_tokens)
-        ranked = sorted(enumerate(scores), key=lambda item: item[1], reverse=True)[:top_k]
+        ranked = sorted(enumerate(scores), key=lambda item: item[1], reverse=True)
+
+        doc_filter_lower = doc_filter.lower().strip() if doc_filter else None
 
         results: list[dict[str, Any]] = []
         for idx, score in ranked:
+            if len(results) >= top_k:
+                break
             chunk = self.chunks[idx]
+            if doc_filter_lower:
+                chunk_doc = str(chunk.get("doc_name", "")).lower()
+                if doc_filter_lower not in chunk_doc:
+                    continue
             results.append(
                 {
                     "chunk_id": chunk.get("chunk_id"),

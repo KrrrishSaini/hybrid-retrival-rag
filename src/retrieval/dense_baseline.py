@@ -8,11 +8,14 @@ import json
 import logging
 from pathlib import Path
 import re
+import signal
 from time import time
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
+
+if TYPE_CHECKING:
+    from sentence_transformers.SentenceTransformer import SentenceTransformer
 
 LOGGER = logging.getLogger(__name__)
 
@@ -89,6 +92,7 @@ class DenseRetriever:
         batch_size: int = 64,
         device: str = "cpu",
         local_files_only: bool = False,
+        model_load_timeout_s: int = 60,
         prefer_faiss: bool = True,
         force_rebuild: bool = False,
     ) -> None:
@@ -99,6 +103,7 @@ class DenseRetriever:
         self.batch_size = batch_size
         self.device = device
         self.local_files_only = local_files_only
+        self.model_load_timeout_s = model_load_timeout_s
         self.prefer_faiss = prefer_faiss
 
         self.index_dir.mkdir(parents=True, exist_ok=True)
@@ -148,24 +153,61 @@ class DenseRetriever:
 
     def _load_model(self) -> SentenceTransformer:
         """Load sentence-transformers model with local-cache retry."""
-        if self.local_files_only:
-            return SentenceTransformer(self.model_name, device=self.device, local_files_only=True)
+        # Import only the SentenceTransformer class directly to avoid the
+        # heavy top-level package import path that also loads cross-encoder modules.
+        from sentence_transformers.SentenceTransformer import SentenceTransformer
+
+        def _timeout_handler(signum: int, frame: Any) -> None:
+            raise TimeoutError(
+                f"Timed out after {self.model_load_timeout_s}s while loading dense model "
+                f"'{self.model_name}'."
+            )
+
+        import threading
+        use_timeout = (
+            hasattr(signal, "SIGALRM")
+            and self.model_load_timeout_s > 0
+            and threading.current_thread() is threading.main_thread()
+        )
+        previous_handler = None
+        if use_timeout:
+            previous_handler = signal.getsignal(signal.SIGALRM)
+            signal.signal(signal.SIGALRM, _timeout_handler)
+            signal.alarm(self.model_load_timeout_s)
 
         try:
-            return SentenceTransformer(self.model_name, device=self.device)
-        except Exception as exc:
-            LOGGER.warning(
-                "Online model load failed for %s; retrying with local cache only. Reason: %s",
-                self.model_name,
-                exc,
-            )
-            try:
+            if self.local_files_only:
                 return SentenceTransformer(self.model_name, device=self.device, local_files_only=True)
-            except Exception as local_exc:
-                raise RuntimeError(
-                    f"Failed to load model '{self.model_name}'. "
-                    "Download it once with network access or pass a local model path."
-                ) from local_exc
+
+            try:
+                return SentenceTransformer(self.model_name, device=self.device)
+            except Exception as exc:
+                LOGGER.warning(
+                    "Online model load failed for %s; retrying with local cache only. Reason: %s",
+                    self.model_name,
+                    exc,
+                )
+                try:
+                    return SentenceTransformer(
+                        self.model_name,
+                        device=self.device,
+                        local_files_only=True,
+                    )
+                except Exception as local_exc:
+                    raise RuntimeError(
+                        f"Failed to load model '{self.model_name}'. "
+                        "Download it once with network access or pass a local model path."
+                    ) from local_exc
+        except TimeoutError as exc:
+            raise RuntimeError(
+                f"{exc} This environment is likely stuck importing transformers/sklearn. "
+                "Try a Python 3.11 venv for stable startup."
+            ) from exc
+        finally:
+            if use_timeout:
+                signal.alarm(0)
+                if previous_handler is not None:
+                    signal.signal(signal.SIGALRM, previous_handler)
 
     def _cache_valid(self) -> bool:
         """Check whether cached embeddings can be reused."""
@@ -255,30 +297,48 @@ class DenseRetriever:
         self.index_backend = "sklearn"
         LOGGER.info("Using sklearn NearestNeighbors backend (cosine)")
 
-    def retrieve(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
-        """Retrieve top-k chunks for a query."""
+    def retrieve(
+        self, query: str, top_k: int = 10, *, doc_filter: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Retrieve top-k chunks for a query.
+
+        Args:
+            query: Search query text.
+            top_k: Number of results to return.
+            doc_filter: If set, only return chunks whose ``doc_name`` contains
+                this substring (case-insensitive).
+        """
         if top_k <= 0:
             raise ValueError("top_k must be > 0.")
         if not query.strip():
             raise ValueError("Query cannot be empty.")
 
-        query_embedding = self._encode_texts([query], show_progress=False).astype(np.float32)
-        k = min(top_k, len(self.chunks))
+        # When filtering, fetch a larger pool so we can still fill top_k after filtering.
+        fetch_k = min(top_k * 3 if doc_filter else top_k, len(self.chunks))
 
-        results: list[dict[str, Any]] = []
+        query_embedding = self._encode_texts([query], show_progress=False).astype(np.float32)
+
         if self.index_backend == "faiss":
-            scores, indices = self.index.search(query_embedding, k)
+            scores, indices = self.index.search(query_embedding, fetch_k)
             ranked_indices = indices[0]
             ranked_scores = scores[0]
         else:
-            distances, indices = self.index.kneighbors(query_embedding, n_neighbors=k)
+            distances, indices = self.index.kneighbors(query_embedding, n_neighbors=fetch_k)
             ranked_indices = indices[0]
             ranked_scores = 1.0 - distances[0]
 
+        doc_filter_lower = doc_filter.lower().strip() if doc_filter else None
+        results: list[dict[str, Any]] = []
         for idx, score in zip(ranked_indices, ranked_scores):
+            if len(results) >= top_k:
+                break
             if int(idx) < 0:
                 continue
             chunk = self.chunks[int(idx)]
+            if doc_filter_lower:
+                chunk_doc = str(chunk.get("doc_name", "")).lower()
+                if doc_filter_lower not in chunk_doc:
+                    continue
             results.append(
                 {
                     "chunk_id": chunk.get("chunk_id"),
@@ -335,6 +395,12 @@ def parse_args() -> argparse.Namespace:
         help="Embedding model device (default: cpu).",
     )
     parser.add_argument(
+        "--model_load_timeout_s",
+        type=int,
+        default=60,
+        help="Timeout for dense model loading in seconds (0 disables timeout).",
+    )
+    parser.add_argument(
         "--local_files_only",
         action="store_true",
         help="Load embedding model strictly from local cache (no network).",
@@ -383,6 +449,7 @@ def main() -> int:
             batch_size=args.batch_size,
             device=args.device,
             local_files_only=args.local_files_only,
+            model_load_timeout_s=args.model_load_timeout_s,
             prefer_faiss=not args.no_faiss,
             force_rebuild=args.force_rebuild,
         )

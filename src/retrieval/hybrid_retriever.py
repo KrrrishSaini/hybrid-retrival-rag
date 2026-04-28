@@ -51,6 +51,7 @@ class HybridRetriever:
         batch_size: int = 64,
         device: str = "cpu",
         local_files_only: bool = False,
+        model_load_timeout_s: int = 60,
         prefer_faiss: bool = True,
         force_rebuild_dense: bool = False,
     ) -> None:
@@ -79,19 +80,33 @@ class HybridRetriever:
             batch_size=batch_size,
             device=device,
             local_files_only=local_files_only,
+            model_load_timeout_s=model_load_timeout_s,
             prefer_faiss=prefer_faiss,
             force_rebuild=force_rebuild_dense,
         )
 
-    def retrieve(self, query: str, top_k: int = 10) -> list[dict[str, Any]]:
-        """Retrieve top-k results after merging BM25 and dense candidates."""
+    def retrieve(
+        self, query: str, top_k: int = 10, *, doc_filter: str | None = None
+    ) -> list[dict[str, Any]]:
+        """Retrieve top-k results after merging BM25 and dense candidates.
+
+        Args:
+            query: Search query text.
+            top_k: Number of final results.
+            doc_filter: If set, restrict both BM25 and dense retrieval to chunks
+                whose ``doc_name`` contains this substring (case-insensitive).
+        """
         if top_k <= 0:
             raise ValueError("top_k must be > 0.")
         if not query.strip():
             raise ValueError("Query cannot be empty.")
 
-        bm25_results = self.bm25_retriever.retrieve(query=query, top_k=self.top_k_bm25)
-        dense_results = self.dense_retriever.retrieve(query=query, top_k=self.top_k_dense)
+        bm25_results = self.bm25_retriever.retrieve(
+            query=query, top_k=self.top_k_bm25, doc_filter=doc_filter
+        )
+        dense_results = self.dense_retriever.retrieve(
+            query=query, top_k=self.top_k_dense, doc_filter=doc_filter
+        )
 
         bm25_scores_raw = {
             str(item.get("chunk_id")): float(item.get("score", 0.0))
@@ -202,6 +217,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch_size", type=int, default=64, help="Dense embedding batch size.")
     parser.add_argument("--device", type=str, default="cpu", help="Dense model device (default: cpu).")
     parser.add_argument(
+        "--model_load_timeout_s",
+        type=int,
+        default=60,
+        help="Timeout for dense/reranker model loading in seconds (0 disables timeout).",
+    )
+    parser.add_argument(
         "--local_files_only",
         action="store_true",
         help="Load dense model strictly from local cache (no network).",
@@ -236,6 +257,12 @@ def parse_args() -> argparse.Namespace:
         help="Force dense embedding cache rebuild.",
     )
     parser.add_argument(
+        "--doc_filter",
+        type=str,
+        default=None,
+        help="Restrict retrieval to chunks whose doc_name contains this substring (case-insensitive).",
+    )
+    parser.add_argument(
         "--log_level",
         type=str,
         default="INFO",
@@ -260,6 +287,7 @@ def main() -> int:
         level=getattr(logging, args.log_level),
         format="%(asctime)s | %(levelname)s | %(message)s",
     )
+    LOGGER.info("Starting hybrid retrieval CLI. Query received; initializing retrievers.")
 
     try:
         retriever = HybridRetriever(
@@ -272,21 +300,27 @@ def main() -> int:
             batch_size=args.batch_size,
             device=args.device,
             local_files_only=args.local_files_only,
+            model_load_timeout_s=args.model_load_timeout_s,
             prefer_faiss=not args.no_faiss,
             force_rebuild_dense=args.force_rebuild_dense,
         )
         if args.use_reranker:
             candidate_k = max(args.top_k, args.top_k_hybrid_candidates)
-            hybrid_candidates = retriever.retrieve(query=args.query, top_k=candidate_k)
+            hybrid_candidates = retriever.retrieve(
+                query=args.query, top_k=candidate_k, doc_filter=args.doc_filter
+            )
             reranker = CrossEncoderReranker(
                 model_name=args.reranker_model_name,
                 batch_size=args.reranker_batch_size,
                 device=args.device,
                 local_files_only=args.local_files_only,
+                model_load_timeout_s=args.model_load_timeout_s,
             )
             results = reranker.rerank(query=args.query, candidates=hybrid_candidates, top_k=args.top_k)
         else:
-            results = retriever.retrieve(query=args.query, top_k=args.top_k)
+            results = retriever.retrieve(
+                query=args.query, top_k=args.top_k, doc_filter=args.doc_filter
+            )
     except (FileNotFoundError, ValueError, ImportError, RuntimeError) as exc:
         print(f"Error: {exc}")
         return 1
